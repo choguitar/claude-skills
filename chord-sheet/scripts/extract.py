@@ -11,7 +11,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-from build import split_measures
+from build import join_measures, split_measures
 
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
@@ -40,7 +40,7 @@ def kind_of(p, text):
 
 def normalize_chord(text):
     """마디 사이 공백·탭을 정리한다. 빈 마디(앞 코드가 이어지는 마디)도 한 마디로 남긴다."""
-    return ' '.join(split_measures(text))
+    return join_measures(split_measures(text))
 
 
 def guess_key(chord_lines):

@@ -38,6 +38,7 @@ BASE_SPACING = -20        # 코드·가사 기본 자간 -1pt
 TIGHT_SPACING = -40       # '코드 좁게' 자간 -2pt
 LYRIC_MIN_SPACING = -40   # 가사 자동 축소 하한. 이보다 더 줄여야 하면 줄바꿈을 허용하고 경고
 MIN_GAP = 40              # 마디 끝과 다음 탭 사이 최소 여백
+RIGHT_EDGE_GAP = 20       # 줄 끝 반복 표시(':|')를 단 오른쪽 끝에서 이만큼 안쪽에 맞춘다
 LINE_SPACING = 216        # 줄 간격 0.9배 (240 = 1배)
 SECTION_SPACE_BEFORE = 120  # 섹션 위 6pt — 섹션 사이 빈 줄을 대체
 
@@ -99,19 +100,37 @@ def run(text, rpr=''):
 
 def split_measures(line):
     """'|' 하나가 한 마디를 연다. 빈 마디('|' 뒤가 비었음)는 앞 코드가 이어지는 마디라 그대로 둔다.
-    ':|'는 반복 끝 표시라 마디가 아니다.
-    '|:Em |A7 | |C G :|' → ['|:Em', '|A7', '|', '|C G:|']"""
-    parts = [' '.join(p.split()) for p in line.split('|')[1:]]
+    ':|'는 그 마디의 반복 끝 표시로 마디 끝에 붙는다 — 줄 끝이든 줄 중간(':|' 바로 뒤가 다음 마디)이든.
+    '|:Em |A7 | |C G :|' → ['|:Em', '|A7', '|', '|C G :|'],  '|C | :|' → ['|C', '| :|'],
+    '|C :|Am |F' → ['|C :|', '|Am', '|F']"""
+    raw_parts = line.split('|')[1:]
+    parts = [' '.join(p.split()) for p in raw_parts]
     measures, i = [], 0
     while i < len(parts):
         text = parts[i]
-        if text.endswith(':') and i + 1 < len(parts) and parts[i + 1] == '':
-            measures.append('|' + text[:-1].rstrip() + ':|')
-            i += 2
+        # ':' 하나뿐인 칸은 '|:'로 붙어 있으면 빈 마디의 반복 시작, 띄어 있으면 빈 마디의 반복 끝
+        is_start_only = text == ':' and raw_parts[i].startswith(':')
+        if text.endswith(':') and not is_start_only:
+            body = text[:-1].rstrip()
+            measures.append(f'|{body} :|' if body else '| :|')
+            i += 1
+            if i == len(parts) - 1 and parts[i] == '':  # 줄 끝 ':|'의 '|' 뒤 빈칸은 마디가 아니다
+                i += 1
             continue
         measures.append('|' + text)
         i += 1
     return measures
+
+
+def join_measures(measures):
+    """split_measures의 역. ':|' 뒤 마디는 그 '|'를 공유한다: ['|G :|', '|Am'] → '|G :|Am'."""
+    line = ''
+    for m in measures:
+        if line.endswith(':|'):
+            line += m[1:] if m != '|' else ' |'
+        else:
+            line += (' ' if line else '') + m
+    return line
 
 
 def parse(text):
@@ -149,13 +168,16 @@ def group_end(lines, i):
 
 
 def expand_marks(lines):
-    """|: ... :| 구간을 두 번 펼친다. 구간은 여는 코드 줄부터 닫는 코드 줄 아래 가사까지."""
+    """|: ... :| 구간을 두 번 펼친다. 구간은 줄 맨 앞 '|:'로 여는 코드 줄부터 줄 맨 끝 ':|'로 닫는 코드 줄 아래 가사까지.
+    줄 중간의 반복 표시(예: '|C :|Am')는 한 줄 안의 반복이라 펼치지 않고 그대로 둔다."""
     lines = list(lines)
+    line_level = lambda t: ':|' not in t[:-2]  # 줄 중간에 반복 끝이 없다
     while True:
-        start = next((i for i, (k, t) in enumerate(lines) if k == 'chord' and t.startswith('|:')), None)
+        start = next((i for i, (k, t) in enumerate(lines) if k == 'chord' and t.startswith('|:') and line_level(t)), None)
         if start is None:
             return lines
-        end = next((i for i in range(start, len(lines)) if lines[i][0] == 'chord' and lines[i][1].endswith(':|')), None)
+        end = next((i for i in range(start, len(lines))
+                    if lines[i][0] == 'chord' and lines[i][1].endswith(':|') and line_level(lines[i][1])), None)
         if end is None:
             return lines
         block = lines[start:group_end(lines, end)]
@@ -223,38 +245,58 @@ class Builder:
         return f'{TIGHT_STYLE}<w:spacing w:val="{spacing}"/>', spacing
 
     def measure_pieces(self, measure, i, is_last, size):
-        """마디를 (시작 위치, 텍스트, rPr 조각, 자간) 조각으로 나눈다.
+        """마디를 조각 [(탭 위치, 텍스트, rPr 조각, 자간, 추가 탭)]으로 나눈다.
+        추가 탭이 None이면 스타일의 반 마디 탭에서 시작한다. 'left'/'right'면 그 위치에 문단 탭을 더한다
+        ('right'는 탭 위치에서 끝난다).
         코드 2개는 반 마디씩 — 반 마디 칸에 안 들어가면 '코드 좁게', 그래도 안 되면 한 조각.
-        줄의 마지막 마디는 단 끝까지 쓸 수 있다."""
+        줄의 마지막 마디는 단 끝까지 쓸 수 있다.
+        반복 끝은 마디 끝에 붙인다 — 줄 끝이면 ':|'를 오른쪽 맞춤, 줄 중간이면 ':'를 경계 바로 앞에 두어
+        다음 마디의 '|'와 이어 ':|'가 된다. (오른쪽 맞춤 탭은 다음 탭까지의 글자를 통째로 맞추므로 줄 중간엔 못 쓴다)"""
         start = MEASURE_SLOT * i
-        slot = self.col_width - start if is_last else MEASURE_SLOT
+        slot_end = self.col_width if is_last else start + MEASURE_SLOT
+        mark = []
+        if measure.endswith(':|'):
+            measure = measure[:-2].rstrip() or '|'
+            if is_last:
+                mark = [(self.col_width - RIGHT_EDGE_GAP, ':|', '', BASE_SPACING, 'right')]
+                slot_end = mark[0][0] - text_width(':|', BASE_SPACING, size)
+            else:
+                slot_end -= text_width(':', BASE_SPACING, size)
+                mark = [(slot_end, ':', '', BASE_SPACING, 'left')]
+        slot = slot_end - start
         chords = measure[1:].split()
         if len(chords) == 2:
             halves = (('|' + chords[0], HALF_SLOT), (chords[1], slot - HALF_SLOT))
             for spacing, rpr in ((BASE_SPACING, ''), (TIGHT_SPACING, TIGHT_STYLE)):
                 if all(text_width(t, spacing, size) + MIN_GAP <= s for t, s in halves):
-                    return [(start, halves[0][0], rpr, spacing), (start + HALF_SLOT, halves[1][0], rpr, spacing)]
+                    return [(start, halves[0][0], rpr, spacing, None),
+                            (start + HALF_SLOT, halves[1][0], rpr, spacing, None)] + mark
         rpr, spacing = self.measure_fit(measure, slot, size)
-        return [(start, measure, rpr, spacing)]
+        return [(start, measure, rpr, spacing, None)] + mark
 
     def chord_bodies(self, line, size):
-        """코드 줄 → 줄마다의 run XML. 5마디 이상은 4마디씩 나눈다."""
+        """코드 줄 → 줄마다 (문단 탭 설정, run XML). 5마디 이상은 4마디씩 나눈다.
+        반복 끝 표시가 있는 줄은 그 자리의 탭을 문단에 추가한다."""
         measures = split_measures(line)
         if len(measures) > MEASURES_PER_LINE:
             self.warnings.append(f'{len(measures)}마디 줄을 {MEASURES_PER_LINE}마디씩 나눔: {line}')
         size_rpr = '' if size == BASE_SIZE else f'<w:sz w:val="{size}"/><w:szCs w:val="{size + 4}"/>'
-        bodies = []
+        out = []
         for first in range(0, len(measures), MEASURES_PER_LINE):
-            body, cursor = [], 0
             chunk = measures[first:first + MEASURES_PER_LINE]
-            for i, measure in enumerate(chunk):
-                for pos, text, rpr, spacing in self.measure_pieces(measure, i, i == len(chunk) - 1, size):
-                    # Word 탭은 현재 위치보다 뒤의 첫 탭 위치로 간다 → pos까지 지나칠 탭 개수
-                    body.append('<w:r><w:tab/></w:r>' * int(pos // HALF_SLOT - cursor // HALF_SLOT))
-                    body.append(run(text, rpr + size_rpr))
-                    cursor = pos + text_width(text, spacing, size)
-            bodies.append(''.join(body))
-        return bodies
+            pieces = [p for i, m in enumerate(chunk) for p in self.measure_pieces(m, i, i == len(chunk) - 1, size)]
+            extra = [(kind, pos) for pos, *_, kind in pieces if kind]
+            stops = sorted(set(TAB_STOPS) | {pos for _, pos in extra})
+            body, cursor = [], 0
+            for pos, text, rpr, spacing, kind in pieces:
+                # Word 탭은 현재 위치보다 뒤의 첫 탭 위치로 간다 → pos까지 지나칠 탭 개수.
+                # 앞 글자가 정확히 pos에서 끝나면(줄 중간 ':' 뒤의 '|') 탭 없이 바로 이어진다.
+                body.append('<w:r><w:tab/></w:r>' * sum(1 for s in stops if cursor < s <= pos))
+                body.append(run(text, rpr + size_rpr))
+                cursor = pos if kind == 'right' else pos + text_width(text, spacing, size)
+            tabs = ''.join(f'<w:tab w:val="{kind}" w:pos="{int(pos)}"/>' for kind, pos in extra)
+            out.append((f'<w:tabs>{tabs}</w:tabs>' if tabs else '', ''.join(body)))
+        return out
 
     # ---- 세로: 한 페이지 안에 넣기 ----
 
@@ -328,13 +370,13 @@ class Builder:
             out.append(f'<w:p><w:pPr><w:pStyle w:val="SongInfo"/></w:pPr>{run(song["info"])}</w:p>')
 
         for sec in song['sections']:
-            # (스타일, 본문, 묶음 시작 여부)
-            items = [('SongSection', run(sec['name']), True)] if sec['name'] else []
+            # (스타일, 본문, 묶음 시작 여부, 문단 탭 설정)
+            items = [('SongSection', run(sec['name']), True, '')] if sec['name'] else []
             has_lines = False  # 섹션 제목 바로 다음 코드 줄은 새 묶음이 아니다
             for kind, text in sec['lines']:
                 if kind == 'chord':
                     bodies = self.chord_bodies(text, size)
-                    items += [('Chord', b, grouped and n == 0 and has_lines) for n, b in enumerate(bodies)]
+                    items += [('Chord', b, grouped and n == 0 and has_lines, tabs) for n, (tabs, b) in enumerate(bodies)]
                     has_lines = True
                     continue
                 has_lines = True
@@ -342,12 +384,12 @@ class Builder:
                 if spacing == 'wrap':
                     self.warnings.append(f'가사가 길어 줄바꿈됨 (두 줄로 나누길 권장): {text}')
                 rpr = (f'<w:spacing w:val="{spacing}"/>' if isinstance(spacing, int) else '') + size_rpr
-                items.append(('Lyric', run(text, rpr), False))
-            for n, (style, body, _) in enumerate(items):
+                items.append(('Lyric', run(text, rpr), False, ''))
+            for n, (style, body, _, tabs) in enumerate(items):
                 last_in_unit = n == len(items) - 1 or items[n + 1][2]
                 keep = '<w:keepNext w:val="0"/>' if last_in_unit else '<w:keepNext/>'
                 ppr = line_ppr if style in ('Chord', 'Lyric') else ''
-                out.append(f'<w:p><w:pPr><w:pStyle w:val="{style}"/>{keep}{ppr}</w:pPr>{body}</w:p>')
+                out.append(f'<w:p><w:pPr><w:pStyle w:val="{style}"/>{keep}{tabs}{ppr}</w:pPr>{body}</w:p>')
         return out
 
     def build(self, songs, starts_on_new_page):
