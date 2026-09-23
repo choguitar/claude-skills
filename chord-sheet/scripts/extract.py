@@ -43,13 +43,23 @@ def normalize_chord(text):
     return join_measures(split_measures(text))
 
 
+# 단조 → 나란한조 장조(단3도 위). 조표가 같아 스케일·카포 계산에 쓴다
+RELATIVE_MAJOR = {'A': 'C', 'A#': 'C#', 'Bb': 'Db', 'B': 'D', 'C': 'Eb', 'C#': 'E', 'Db': 'E', 'D': 'F',
+                  'D#': 'F#', 'Eb': 'Gb', 'E': 'G', 'F': 'Ab', 'F#': 'A', 'Gb': 'A', 'G': 'Bb', 'G#': 'B', 'Ab': 'B'}
+
+
+def key_label(root, minor):
+    """곡 정보 줄의 Key 표기. 단조는 'Bm (D)'처럼 나란한조 장조를 괄호로 붙인다."""
+    return f'{root}m ({RELATIVE_MAJOR[root]})' if minor else root
+
+
 def guess_key(chord_lines):
     tokens = ' '.join(chord_lines).replace('|', ' ').replace(':', ' ').split()
     for token in reversed(tokens):
-        root = re.match(r'[A-G][#b]?m?(?!aj)', token)
-        if root:
-            return root.group(0)
-    return '?'
+        chord = re.match(r'([A-G][#b]?)(m(?!aj))?', token)
+        if chord:
+            return key_label(chord.group(1), bool(chord.group(2)))
+    return '–'
 
 
 def main():
