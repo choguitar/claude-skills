@@ -1,4 +1,5 @@
 """MS Word로 docx를 PDF로 내보낸다 (Windows + Word 필요). Word 렌더링 그대로라 인쇄·배포본과 같다.
+곡 제목('악보 제목' 스타일, 개요 수준 1)이 PDF 책갈피로 들어간다.
 
 사용법: python export_pdf.py IN.docx [OUT.pdf]   (OUT 생략 시 같은 이름 .pdf)
 """
@@ -15,7 +16,8 @@ $ErrorActionPreference = 'Stop'
 $word = New-Object -ComObject Word.Application
 try {
   $doc = $word.Documents.Open('{src}', $false, $true)
-  $doc.ExportAsFixedFormat('{dst}', 17)
+  # 17 = PDF. 마지막 인자 1 = 제목(개요 수준)으로 책갈피 생성 → 곡 제목이 PDF 책갈피가 된다
+  $doc.ExportAsFixedFormat('{dst}', 17, $false, 0, 0, 1, 1, 0, $true, $true, 1)
   $doc.Close($false)
 } finally { $word.Quit() }
 '''

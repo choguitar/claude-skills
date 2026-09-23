@@ -20,7 +20,7 @@ description: 코드+가사 악보를 정해진 서식의 docx·PDF로 만든다.
 | `python scripts/extract.py IN.docx OUT.txt` | 기존 악보 docx를 변환하거나 고칠 때 — 텍스트로 뽑기 |
 | `python scripts/build.py SONGS.txt OUT.docx [--append-to EXISTING.docx]` | txt가 준비되면 — 악보 docx 만들기. `--append-to`는 기존 악보 뒤에 곡 추가 |
 | `python scripts/check_layout.py OUT.docx` | 빌드 직후 — Word 실제 배치로 규칙 위반 검사 |
-| `python scripts/export_pdf.py OUT.docx [OUT.pdf]` | 검사 뒤 확인용, 또는 PDF를 달라고 할 때 |
+| `python scripts/export_pdf.py OUT.docx [OUT.pdf]` | 검사 뒤 확인용, 또는 PDF를 달라고 할 때. 곡 제목이 PDF 책갈피로 들어간다 |
 
 ## 참고 문서
 
