@@ -98,13 +98,19 @@ def run(text, rpr=''):
 
 
 def split_measures(line):
-    """'|:Em |A7 |C G/B Am G :|' → ['|:Em', '|A7', '|C G/B Am G:|']"""
-    measures = []
-    for part in line.split('|')[1:]:
-        text = ' '.join(part.split())
-        if not text:
+    """'|' 하나가 한 마디를 연다. 빈 마디('|' 뒤가 비었음)는 앞 코드가 이어지는 마디라 그대로 둔다.
+    ':|'는 반복 끝 표시라 마디가 아니다.
+    '|:Em |A7 | |C G :|' → ['|:Em', '|A7', '|', '|C G:|']"""
+    parts = [' '.join(p.split()) for p in line.split('|')[1:]]
+    measures, i = [], 0
+    while i < len(parts):
+        text = parts[i]
+        if text.endswith(':') and i + 1 < len(parts) and parts[i + 1] == '':
+            measures.append('|' + text[:-1].rstrip() + ':|')
+            i += 2
             continue
-        measures.append('|' + (text[:-1].rstrip() + ':|' if text.endswith(':') else text))
+        measures.append('|' + text)
+        i += 1
     return measures
 
 
@@ -234,6 +240,8 @@ class Builder:
     def chord_bodies(self, line, size):
         """코드 줄 → 줄마다의 run XML. 5마디 이상은 4마디씩 나눈다."""
         measures = split_measures(line)
+        if len(measures) > MEASURES_PER_LINE:
+            self.warnings.append(f'{len(measures)}마디 줄을 {MEASURES_PER_LINE}마디씩 나눔: {line}')
         size_rpr = '' if size == BASE_SIZE else f'<w:sz w:val="{size}"/><w:szCs w:val="{size + 4}"/>'
         bodies = []
         for first in range(0, len(measures), MEASURES_PER_LINE):
