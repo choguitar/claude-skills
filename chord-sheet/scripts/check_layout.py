@@ -52,6 +52,8 @@ def main():
     rows = read_layout(sys.argv[1])
     problems, notes, title, section, prev = [], [], None, None, None
     for page, x, style, text in rows:
+        if not text.replace('\x0e', '').replace('\x0c', '').strip():  # 단 나누기(\x0e)·빈 공간 문단
+            continue
         column = (page, x)
         if style == '악보 제목':
             title, title_page, section = text, page, None

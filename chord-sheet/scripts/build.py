@@ -98,6 +98,14 @@ def run(text, rpr=''):
     return f'<w:r>{f"<w:rPr>{rpr}</w:rPr>" if rpr else ""}<w:t xml:space="preserve">{escape(text)}</w:t></w:r>'
 
 
+def column_top_spacer(height):
+    """단 나누기 + 다음 단 맨 위 빈 공간(height twip). 단 나누기 문단은 1pt로 둬서 앞 단 끝에 공간을 거의 쓰지 않는다."""
+    thin = 20
+    return [f'<w:p><w:pPr><w:pStyle w:val="Lyric"/><w:spacing w:line="{thin}" w:lineRule="exact"/></w:pPr>'
+            '<w:r><w:br w:type="column"/></w:r></w:p>',
+            f'<w:p><w:pPr><w:pStyle w:val="Lyric"/><w:keepNext/><w:spacing w:line="{height - thin}" w:lineRule="exact"/></w:pPr></w:p>']
+
+
 def split_measures(line):
     """'|' 하나가 한 마디를 연다. 빈 마디('|' 뒤가 비었음)는 앞 코드가 이어지는 마디라 그대로 둔다.
     ':|'는 그 마디의 반복 끝 표시로 마디 끝에 붙는다 — 줄 끝이든 줄 중간(':|' 바로 뒤가 다음 마디)이든.
@@ -306,7 +314,7 @@ class Builder:
         return 2 if self.lyric_spacing(text, size) == 'wrap' else 1
 
     def units(self, song, grouped, size, line):
-        """붙여 둘 묶음들의 높이. grouped=False면 섹션 단위, True면 '코드 줄 + 아래 가사' 단위."""
+        """붙여 둘 묶음들 [(높이, 섹션 제목으로 시작하는지)]. grouped=False면 섹션 단위, True면 '코드 줄 + 아래 가사' 단위."""
         line_height = LINE_HEIGHT * size * line / (BASE_SIZE * LINE_SPACING)
         out = []
         for sec in song['sections']:
@@ -316,23 +324,35 @@ class Builder:
                 if grouped and kind == 'chord' and groups[-1]:
                     groups.append([])
                 groups[-1].append(self.line_count(kind, text, size) * line_height)
-            out.append(head + sum(groups[0]))
-            out.extend(sum(g) for g in groups[1:])
+            out.append((head + sum(groups[0]), bool(sec['name'])))
+            out.extend((sum(g), False) for g in groups[1:])
         return out
 
-    def columns_needed(self, heights, head):
-        """단 순서대로 채울 때 필요한 단 수. 한 묶음이 한 단보다 크면 None."""
-        cols, used = 1, head  # 제목·곡 정보는 첫 묶음과 함께 움직인다
-        for i, h in enumerate(heights):
+    def columns_needed(self, units, head, align):
+        """단 순서대로 채울 때 (필요한 단 수, 둘째 단을 여는 묶음 번호). 한 묶음이 한 단보다 크면 (None, None).
+        align=True면 둘째 단 첫 줄을 첫째 단의 첫 섹션 높이에 맞추는 빈 공간(top_offset)을 둘째 단 위에 둔다."""
+        cols, used, split = 1, head, None  # 제목·곡 정보는 첫 묶음과 함께 움직인다
+        for i, (h, starts_section) in enumerate(units):
             if h + (head if i == 0 else 0) > self.col_height:
-                return None
+                return None, None
             if i > 0 and used + h > self.col_height:
-                cols, used = cols + 1, 0
+                cols += 1
+                used = self.top_offset(head, starts_section) if align and cols == 2 else 0
+                split = i if cols == 2 else split
+                if used + h > self.col_height:
+                    return None, None
             used += h
-        return cols
+        return cols, split
+
+    @staticmethod
+    def top_offset(head, starts_section):
+        """둘째 단 위 빈 공간. 섹션 제목으로 시작하면 그 섹션의 위 여백이 더해지므로 제목·곡 정보 높이만,
+        코드 줄로 시작하면 섹션 위 여백만큼 더 둔다 — 첫째 단의 첫 섹션 줄과 같은 높이가 된다."""
+        return head + (0 if starts_section else SECTION_SPACE_BEFORE)
 
     def plan(self, song):
-        """(내용, 글자 크기, 줄 간격, 묶음 방식, 필요한 단 수) — 배치 규칙 순서대로 두 단(한 페이지) 안에 드는 첫 조합."""
+        """(내용, 글자 크기, 줄 간격, 묶음 방식, 필요한 단 수, 둘째 단 맞춤) — 배치 규칙 순서대로 두 단(한 페이지) 안에 드는 첫 조합.
+        둘째 단 맞춤은 (여는 묶음 번호, 빈 공간 높이) 또는 None — 맞춤은 '가능하면'이라, 넣으면 넘치는 조합에서는 뺀다."""
         head = TITLE_HEIGHT + (INFO_HEIGHT if song['info'] else 0)
         expanded = expand_song(song)
         folded = compress_song(expanded)
@@ -340,21 +360,29 @@ class Builder:
                    (folded, BASE_SIZE, LINE_SPACING, False),
                    (folded, BASE_SIZE, LINE_SPACING, True)]
         options += [(folded, size, line, grouped) for size, line in SHRINK_STEPS for grouped in (False, True)]
+        align = None
         for content, size, line, grouped in options:
-            cols = self.columns_needed(self.units(content, grouped, size, line), head)
+            units = self.units(content, grouped, size, line)
+            cols, split = self.columns_needed(units, head, align=True)
             if cols and cols <= 2:
+                align = (split, self.top_offset(head, units[split][1])) if split is not None else None
+                break
+            cols, _ = self.columns_needed(units, head, align=False)
+            if cols and cols <= 2:
+                self.warnings.append(f'둘째 단 첫 줄 높이 맞춤을 생략함(맞추면 한 페이지를 넘음): {song["title"]}')
                 break
         else:
             self.warnings.append(f'최대로 줄여도 한 페이지를 넘음 — 섹션 생략 등 곡을 줄여야 함: {song["title"]}')
             cols = 3
         if content is folded and folded != expanded:
             self.warnings.append(f'한 페이지에 맞추려고 반복 구간을 도돌이표로 접음: {song["title"]}')
-        return content, size, line, grouped, cols
+        return content, size, line, grouped, cols, align
 
     # ---- XML ----
 
-    def song_paras(self, song, size, line, grouped, start):
-        """start: None(문서 첫 곡) | 'column' | 'page'"""
+    def song_paras(self, song, size, line, grouped, start, align):
+        """start: None(문서 첫 곡) | 'column' | 'page'
+        align: (둘째 단을 여는 묶음 번호, 빈 공간 높이) — 그 묶음 앞에서 단을 나누고 빈 공간을 둔다."""
         shrunk = (size, line) != (BASE_SIZE, LINE_SPACING)
         line_ppr = f'<w:spacing w:line="{line}" w:lineRule="auto"/>' if shrunk else ''
         size_rpr = f'<w:sz w:val="{size}"/><w:szCs w:val="{size + 4}"/>' if shrunk else ''
@@ -369,6 +397,7 @@ class Builder:
         if song['info']:
             out.append(f'<w:p><w:pPr><w:pStyle w:val="SongInfo"/></w:pPr>{run(song["info"])}</w:p>')
 
+        unit = -1  # units()와 같은 순서로 센 묶음 번호
         for sec in song['sections']:
             # (스타일, 본문, 묶음 시작 여부, 문단 탭 설정)
             items = [('SongSection', run(sec['name']), True, '')] if sec['name'] else []
@@ -385,7 +414,11 @@ class Builder:
                     self.warnings.append(f'가사가 길어 줄바꿈됨 (두 줄로 나누길 권장): {text}')
                 rpr = (f'<w:spacing w:val="{spacing}"/>' if isinstance(spacing, int) else '') + size_rpr
                 items.append(('Lyric', run(text, rpr), False, ''))
-            for n, (style, body, _, tabs) in enumerate(items):
+            for n, (style, body, starts_unit, tabs) in enumerate(items):
+                if n == 0 or starts_unit:
+                    unit += 1
+                    if align and unit == align[0]:
+                        out += column_top_spacer(align[1])
                 last_in_unit = n == len(items) - 1 or items[n + 1][2]
                 keep = '<w:keepNext w:val="0"/>' if last_in_unit else '<w:keepNext/>'
                 ppr = line_ppr if style in ('Chord', 'Lyric') else ''
@@ -395,14 +428,14 @@ class Builder:
     def build(self, songs, starts_on_new_page):
         paras, right_column_free = [], False
         for n, song in enumerate(songs):
-            content, size, line, grouped, cols = self.plan(song)
+            content, size, line, grouped, cols, align = self.plan(song)
             if n == 0 and not starts_on_new_page:
                 start = None
             elif right_column_free and cols == 1:
                 start = 'column'
             else:
                 start = 'page'
-            paras += self.song_paras(content, size, line, grouped, start)
+            paras += self.song_paras(content, size, line, grouped, start, align)
             right_column_free = start != 'column' and cols == 1
         return paras
 
